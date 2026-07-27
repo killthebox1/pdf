@@ -1,29 +1,47 @@
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+import os
+import re
+import json
+import logging
+import unicodedata
+
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 import pdfplumber
 from fpdf import FPDF
-import os
-import re
-import unicodedata
 
-# BOT TOKENINIZI BURAYA YAZIN
-TOKEN = "8446108598:AAHc3BHITPo-kuxjz5rzzgCjmnoTxEzL62s"
+# Log ayarları
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
 user_files = {}   # {user_id: pdf_path}
 user_busy = {}    # {user_id: True/False}
+
+# --- JSON Veri Yükleyici ---
+def load_json_data():
+    json_path = os.path.join(os.path.dirname(__file__), 'veriler.json')
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"JSON okuma hatası: {e}")
+            return {}
+    return {}
+
+# GitHub'a yüklenen veriler.json dosyası otomatik okunur
+app_data = load_json_data()
 
 # --- Normalizasyon fonksiyonu ---
 def normalize_text(text: str) -> str:
     if not text:
         return ""
-    # Unicode normalizasyonu
     text = unicodedata.normalize("NFKC", text)
-    # Türkçe karakter düzeltmeleri
     text = text.replace("İ", "i").replace("I", "ı")
-    # Küçük harfe çevir
     return text.lower()
 
 # --- Bot komutları ---
@@ -70,7 +88,7 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     progress_msg = None
 
     try:
-        keyword = " ".join(context.args)  # çok kelimelik arama için
+        keyword = " ".join(context.args)
         keyword_norm = normalize_text(keyword)
         satirlar = []
 
@@ -87,26 +105,34 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if keyword_norm in satir_norm:
                             satirlar.append(temiz_satir)
 
-                # Yüzde ilerleme
                 progress = int((idx / total_pages) * 100)
                 if progress % 10 == 0:
                     try:
                         await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
-                    except:
+                    except Exception:
                         pass
 
         if not satirlar:
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
 
-        # PDF sonuç oluştur
+        # PDF oluşturma
         output_path = f"{user_id}_{keyword}_sonuclar.pdf"
         pdf_output = FPDF()
         pdf_output.add_page()
-        # Font dosya adı düzeltilmiş
-        pdf_output.add_font('DejaVu', '', 'DejaVuSans.ttf', uni=True)
-        pdf_output.set_font('DejaVu', '', 12)
-        pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm satırlar", ln=True, align="C")
+
+        # GitHub'a yüklediğin DejaVuSans.ttf fontunu kullanıyoruz
+        font_path = os.path.join(os.path.dirname(__file__), 'DejaVuSans.ttf')
+        
+        if os.path.exists(font_path):
+            pdf_output.add_font('DejaVu', '', font_path)
+            pdf_output.set_font('DejaVu', '', 12)
+        else:
+            # Font dosyası bulunamazsa varsayılan fonta geçer
+            pdf_output.set_font('Helvetica', '', 12)
+
+        header_text = f"'{keyword}' kelimesi ile bulunan tüm satırlar"
+        pdf_output.cell(0, 10, header_text, new_x="LMARGIN", new_y="NEXT", align="C")
         pdf_output.ln(5)
 
         for i, satir in enumerate(satirlar, 1):
@@ -120,13 +146,13 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_document(document=f, filename=f"{keyword}_sonuclar.pdf")
 
     except Exception as e:
+        err_msg = f"Arama sırasında hata oluştu: {e}"
         if progress_msg:
-            await progress_msg.edit_text(f"Arama sırasında hata oluştu: {e}")
+            await progress_msg.edit_text(err_msg)
         else:
-            await update.message.reply_text(f"Arama sırasında hata oluştu: {e}")
+            await update.message.reply_text(err_msg)
 
     finally:
-        # Geçici dosyaları mutlaka sil
         temp_file = user_files.pop(user_id, None)
         if temp_file and os.path.exists(temp_file):
             os.remove(temp_file)
@@ -138,7 +164,12 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bilinmeyen komut. PDF gönderdikten sonra /search <kelime> kullanabilirsiniz.")
 
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    # Token'ı Railway Environment Variable (BOT_TOKEN) üzerinden alır
+    token = os.environ.get("8446108598:AAHc3BHITPo-kuxjz5rzzgCjmnoTxEzL62s")
+    if not token:
+        raise ValueError("BOT_TOKEN ortam değişkeni bulunamadı! Railway Variables kısmından ayarlayın.")
+
+    app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("search", search_pdf))

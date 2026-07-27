@@ -37,7 +37,7 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# Senkron PDF Arama Fonksiyonu
+# Senkron PDF Arama Fonksiyonu (Düzgün Sıralı Okuma)
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
@@ -45,32 +45,17 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
 
     for idx, page in enumerate(reader.pages, 1):
         try:
-            # Metni fiziksel sayfa düzenini koruyarak (layout mode) çıkarıyoruz
-            metin = page.extract_text(extraction_mode="layout")
-            if not metin:
-                metin = page.extract_text() # Yedek çıkarma yöntemi
+            # Standart çıkarma: Metinleri PDF içindeki doğal okuma sırasıyla alır
+            metin = page.extract_text()
 
             if metin:
-                # Boş satırları temizleyip listeye al
-                raw_lines = [l.strip() for l in metin.split("\n") if l.strip()]
-                
-                for i, satir in enumerate(raw_lines):
-                    # Boşlukları düzenle
+                for satir in metin.split("\n"):
+                    # Birden fazla yan yana boşluğu ve sekme karakterini tek boşluğa indirge
                     temiz_satir = re.sub(r'\s+', ' ', satir).strip()
                     satir_norm = normalize_text(temiz_satir)
                     
                     if keyword_norm in satir_norm:
-                        # Eğer bulunan satır çok kısaysa veya bilgi üst/alt satıra taşmışsa bağlamı koru
-                        tam_satir = temiz_satir
-                        
-                        # Üst satırda kod veya başlık varsa ekle (Satır başı kontrolü)
-                        if i > 0 and len(raw_lines[i-1]) < 80:
-                            ust_satir = re.sub(r'\s+', ' ', raw_lines[i-1]).strip()
-                            # Eğer üst satır zaten eklenmediyse başa birleştir
-                            if ust_satir not in tam_satir:
-                                tam_satir = f"{ust_satir} | {tam_satir}"
-
-                        satirlar.append(tam_satir)
+                        satirlar.append(temiz_satir)
         except Exception:
             pass
         
@@ -161,16 +146,16 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ensure_font_exists()
         if os.path.exists(FONT_PATH):
             pdf_output.add_font('DejaVu', '', FONT_PATH)
-            pdf_output.set_font('DejaVu', '', 11)
+            pdf_output.set_font('DejaVu', '', 10)
         else:
-            pdf_output.set_font('Helvetica', '', 11)
+            pdf_output.set_font('Helvetica', '', 10)
 
         pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm satırlar", new_x="LMARGIN", new_y="NEXT", align="C")
         pdf_output.ln(5)
 
         for i, satir in enumerate(satirlar, 1):
-            pdf_output.multi_cell(0, 7, f"{i}. {satir}")
-            pdf_output.ln(2)
+            pdf_output.multi_cell(0, 6, f"{i}. {satir}")
+            pdf_output.ln(3)
 
         pdf_output.output(output_path)
 

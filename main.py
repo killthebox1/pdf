@@ -37,7 +37,7 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# Senkron PDF Arama Fonksiyonu (Arka planda thread olarak çalışır)
+# Senkron PDF Arama Fonksiyonu
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
@@ -45,17 +45,35 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
 
     for idx, page in enumerate(reader.pages, 1):
         try:
-            metin = page.extract_text()
+            # Metni fiziksel sayfa düzenini koruyarak (layout mode) çıkarıyoruz
+            metin = page.extract_text(extraction_mode="layout")
+            if not metin:
+                metin = page.extract_text() # Yedek çıkarma yöntemi
+
             if metin:
-                for satir in metin.split("\n"):
+                # Boş satırları temizleyip listeye al
+                raw_lines = [l.strip() for l in metin.split("\n") if l.strip()]
+                
+                for i, satir in enumerate(raw_lines):
+                    # Boşlukları düzenle
                     temiz_satir = re.sub(r'\s+', ' ', satir).strip()
                     satir_norm = normalize_text(temiz_satir)
+                    
                     if keyword_norm in satir_norm:
-                        satirlar.append(temiz_satir)
+                        # Eğer bulunan satır çok kısaysa veya bilgi üst/alt satıra taşmışsa bağlamı koru
+                        tam_satir = temiz_satir
+                        
+                        # Üst satırda kod veya başlık varsa ekle (Satır başı kontrolü)
+                        if i > 0 and len(raw_lines[i-1]) < 80:
+                            ust_satir = re.sub(r'\s+', ' ', raw_lines[i-1]).strip()
+                            # Eğer üst satır zaten eklenmediyse başa birleştir
+                            if ust_satir not in tam_satir:
+                                tam_satir = f"{ust_satir} | {tam_satir}"
+
+                        satirlar.append(tam_satir)
         except Exception:
             pass
         
-        # İlerleme durumunu callback ile ilet
         progress = int((idx / total_pages) * 100)
         progress_callback(progress)
 
@@ -119,7 +137,6 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         last_reported_progress = [0]
         loop = asyncio.get_running_loop()
 
-        # İlerleme mesajını Telegram'a bildiren yardımcı fonksiyon
         def progress_callback(progress):
             if progress >= last_reported_progress[0] + 25 or progress == 100:
                 last_reported_progress[0] = progress
@@ -127,7 +144,6 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     update_progress_ui(progress_msg, progress), loop
                 )
 
-        # PDF aramasını ayrı bir Thread içinde çalıştır (Arayüz kilitlenmez)
         with concurrent.futures.ThreadPoolExecutor() as executor:
             satirlar = await loop.run_in_executor(
                 executor, search_pdf_blocking, file_path, keyword_norm, progress_callback
@@ -145,16 +161,16 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ensure_font_exists()
         if os.path.exists(FONT_PATH):
             pdf_output.add_font('DejaVu', '', FONT_PATH)
-            pdf_output.set_font('DejaVu', '', 12)
+            pdf_output.set_font('DejaVu', '', 11)
         else:
-            pdf_output.set_font('Helvetica', '', 12)
+            pdf_output.set_font('Helvetica', '', 11)
 
         pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm satırlar", new_x="LMARGIN", new_y="NEXT", align="C")
         pdf_output.ln(5)
 
         for i, satir in enumerate(satirlar, 1):
-            pdf_output.multi_cell(0, 8, f"{i}. {satir}")
-            pdf_output.ln(1)
+            pdf_output.multi_cell(0, 7, f"{i}. {satir}")
+            pdf_output.ln(2)
 
         pdf_output.output(output_path)
 

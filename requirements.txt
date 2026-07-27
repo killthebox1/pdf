@@ -1,4 +1,5 @@
 python-telegram-bot
+html2image==2.0.5
 pdfplumber
 fpdf2
 Pillow

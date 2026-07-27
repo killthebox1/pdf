@@ -9,6 +9,8 @@ import os
 import re
 import unicodedata
 import urllib.request
+import asyncio
+import time
 
 # Bot Tokeniniz
 TOKEN = "8834883881:AAEYOoaFEqWw3HtwCVl87R9UI2exXED18-s"
@@ -36,6 +38,21 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
+# --- Senkron Arama Fonksiyonu (Arka planda çalışacak) ---
+def search_in_pdf_sync(file_path: str, keyword_norm: str):
+    satirlar = []
+    with pdfplumber.open(file_path) as pdf:
+        total_pages = len(pdf.pages)
+        for idx, sayfa in enumerate(pdf.pages, 1):
+            metin = sayfa.extract_text()
+            if metin:
+                for satir in metin.split("\n"):
+                    temiz_satir = re.sub(r'\s+', ' ', satir).strip()
+                    satir_norm = normalize_text(temiz_satir)
+                    if keyword_norm in satir_norm:
+                        satirlar.append(temiz_satir)
+            yield idx, total_pages, satirlar
+
 # --- Bot komutları ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -50,7 +67,6 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Önceki işlem tamamlanmadı, lütfen bekleyin.")
         return
 
-    # Kullanıcının eski PDF'i varsa temizle
     old_file = user_files.get(user_id)
     if old_file and os.path.exists(old_file):
         try:
@@ -92,26 +108,32 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyword_norm = normalize_text(keyword)
         satirlar = []
 
-        with pdfplumber.open(file_path) as pdf:
-            total_pages = len(pdf.pages)
-            progress_msg = await update.message.reply_text("Arama başladı... %0")
+        progress_msg = await update.message.reply_text("Arama başladı... %0")
+        last_update_time = time.time()
+        last_progress = 0
 
-            for idx, sayfa in enumerate(pdf.pages, 1):
-                metin = sayfa.extract_text()
-                if metin:
-                    for satir in metin.split("\n"):
-                        temiz_satir = re.sub(r'\s+', ' ', satir).strip()
-                        satir_norm = normalize_text(temiz_satir)
-                        if keyword_norm in satir_norm:
-                            satirlar.append(temiz_satir)
+        # PDF okumayı kilitlenmeye neden olmayacak şekilde döngüye alıyoruz
+        loop = asyncio.get_running_loop()
+        gen = search_in_pdf_sync(file_path, keyword_norm)
 
-                # Yüzde ilerleme
+        while True:
+            try:
+                # Ağır işlemi parçalar halinde çağırıyoruz
+                idx, total_pages, current_satirlar = await loop.run_in_executor(None, next, gen)
+                satirlar = current_satirlar
                 progress = int((idx / total_pages) * 100)
-                if progress % 10 == 0:
+
+                # Telegram API limitine takılmamak için en az 2 saniyede bir mesajı güncelle
+                current_time = time.time()
+                if (current_time - last_update_time >= 2.0) and (progress != last_progress):
                     try:
                         await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
-                    except:
+                        last_update_time = current_time
+                        last_progress = progress
+                    except Exception:
                         pass
+            except StopIteration:
+                break
 
         if not satirlar:
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
@@ -122,7 +144,6 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_output = FPDF()
         pdf_output.add_page()
 
-        # Fontu ekle (Eğer yoksa indir)
         ensure_font_exists()
         if os.path.exists(FONT_PATH):
             pdf_output.add_font('DejaVu', '', FONT_PATH)
@@ -150,7 +171,6 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"Arama sırasında hata oluştu: {e}")
 
     finally:
-        # Sadece oluşturulan geçici sonuç PDF'ini sil (Yüklenen ana PDF saklanır)
         if output_path and os.path.exists(output_path):
             try:
                 os.remove(output_path)
@@ -162,7 +182,6 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bilinmeyen komut. PDF gönderdikten sonra /search <kelime> kullanabilirsiniz.")
 
 def main():
-    # Başlangıçta fontun varlığından emin ol
     ensure_font_exists()
 
     app = ApplicationBuilder().token(TOKEN).build()

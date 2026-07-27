@@ -37,7 +37,7 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# Senkron PDF Arama Fonksiyonu (Eksiksiz Blok/Tablo Okuma)
+# ÖSYM Kadro Koduna Göre Satırları Mükemmel Birleştiren Arama Motoru
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
@@ -45,38 +45,47 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
 
     for idx, page in enumerate(reader.pages, 1):
         try:
-            metin = page.extract_text()
-
-            if metin:
-                # Sayfadaki tüm satırları temizleyip listele
-                raw_lines = [re.sub(r'\s+', ' ', l).strip() for l in metin.split("\n") if l.strip()]
-                num_lines = len(raw_lines)
-
-                for i in range(num_lines):
-                    satir_norm = normalize_text(raw_lines[i])
+            text = page.extract_text()
+            if text:
+                lines = text.split('\n')
+                current_record = []
+                
+                for line in lines:
+                    # '||' karakterlerini ve lüzumsuz boşlukları temizle
+                    clean_line = line.replace('|', ' ').strip()
+                    clean_line = re.sub(r'\s+', ' ', clean_line)
                     
-                    if keyword_norm in satir_norm:
-                        # Aranan kelime bulunduysa, eksik kod/isim kalmaması için
-                        # bir önceki satırı, mevcut satırı ve bir sonraki satırı birleştiriyoruz.
-                        blok_parcalari = []
-                        
-                        # Üst satır varsa ekle
-                        if i > 0:
-                            blok_parcalari.append(raw_lines[i - 1])
-                        
-                        # Mevcut satır
-                        blok_parcalari.append(raw_lines[i])
-                        
-                        # Alt satır varsa ekle
-                        if i < num_lines - 1:
-                            blok_parcalari.append(raw_lines[i + 1])
+                    if not clean_line:
+                        continue
+                    
+                    words = clean_line.split()
+                    # 9 haneli ÖSYM Kodu tespiti (Örn: 205010710 ile başlayan satırlar)
+                    is_new_osym_code = False
+                    if words and len(words[0]) == 9 and words[0].isdigit():
+                        is_new_osym_code = True
 
-                        # Bütün parçaları tek bir satırda birleştir
-                        birlesik_satir = " ".join(blok_parcalari)
-                        
-                        # Mükerrer (aynı bloğun tekrar eklenmesi) durumunu önle
-                        if not satirlar or birlesik_satir != satirlar[-1]:
-                            satirlar.append(birlesik_satir)
+                    # Yeni bir kadro kaydına geçildiyse veya dipnot/başlık geldiyse önceki kaydı işle
+                    if is_new_osym_code or clean_line.startswith("Bu pozisyon") or "KPSS" in clean_line or "*Aranan" in clean_line or "ÖSYM KODU" in clean_line:
+                        if current_record:
+                            full_record = " ".join(current_record)
+                            full_record = re.sub(r'\s+', ' ', full_record).strip()
+                            if keyword_norm in normalize_text(full_record):
+                                satirlar.append(full_record)
+                            current_record = []
+                    
+                    # Kayıt toplama mantığı
+                    if is_new_osym_code:
+                        current_record.append(clean_line)
+                    elif current_record and not (clean_line.startswith("Bu pozisyon") or "KPSS" in clean_line or "*Aranan" in clean_line or "ÖSYM KODU" in clean_line):
+                        current_record.append(clean_line)
+
+                # Sayfa sonundaki son kaydı kontrol et
+                if current_record:
+                    full_record = " ".join(current_record)
+                    full_record = re.sub(r'\s+', ' ', full_record).strip()
+                    if keyword_norm in normalize_text(full_record):
+                        satirlar.append(full_record)
+
         except Exception:
             pass
         
@@ -176,7 +185,7 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for i, satir in enumerate(satirlar, 1):
             pdf_output.multi_cell(0, 5, f"{i}. {satir}")
-            pdf_output.ln(3)
+            pdf_output.ln(2)
 
         pdf_output.output(output_path)
 

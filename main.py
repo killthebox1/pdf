@@ -37,7 +37,7 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# Senkron PDF Arama Fonksiyonu (Düzgün Sıralı Okuma)
+# Senkron PDF Arama Fonksiyonu (Eksiksiz Blok/Tablo Okuma)
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
@@ -45,17 +45,38 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
 
     for idx, page in enumerate(reader.pages, 1):
         try:
-            # Standart çıkarma: Metinleri PDF içindeki doğal okuma sırasıyla alır
             metin = page.extract_text()
 
             if metin:
-                for satir in metin.split("\n"):
-                    # Birden fazla yan yana boşluğu ve sekme karakterini tek boşluğa indirge
-                    temiz_satir = re.sub(r'\s+', ' ', satir).strip()
-                    satir_norm = normalize_text(temiz_satir)
+                # Sayfadaki tüm satırları temizleyip listele
+                raw_lines = [re.sub(r'\s+', ' ', l).strip() for l in metin.split("\n") if l.strip()]
+                num_lines = len(raw_lines)
+
+                for i in range(num_lines):
+                    satir_norm = normalize_text(raw_lines[i])
                     
                     if keyword_norm in satir_norm:
-                        satirlar.append(temiz_satir)
+                        # Aranan kelime bulunduysa, eksik kod/isim kalmaması için
+                        # bir önceki satırı, mevcut satırı ve bir sonraki satırı birleştiriyoruz.
+                        blok_parcalari = []
+                        
+                        # Üst satır varsa ekle
+                        if i > 0:
+                            blok_parcalari.append(raw_lines[i - 1])
+                        
+                        # Mevcut satır
+                        blok_parcalari.append(raw_lines[i])
+                        
+                        # Alt satır varsa ekle
+                        if i < num_lines - 1:
+                            blok_parcalari.append(raw_lines[i + 1])
+
+                        # Bütün parçaları tek bir satırda birleştir
+                        birlesik_satir = " ".join(blok_parcalari)
+                        
+                        # Mükerrer (aynı bloğun tekrar eklenmesi) durumunu önle
+                        if not satirlar or birlesik_satir != satirlar[-1]:
+                            satirlar.append(birlesik_satir)
         except Exception:
             pass
         
@@ -146,15 +167,15 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ensure_font_exists()
         if os.path.exists(FONT_PATH):
             pdf_output.add_font('DejaVu', '', FONT_PATH)
-            pdf_output.set_font('DejaVu', '', 10)
+            pdf_output.set_font('DejaVu', '', 9)
         else:
-            pdf_output.set_font('Helvetica', '', 10)
+            pdf_output.set_font('Helvetica', '', 9)
 
-        pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm satırlar", new_x="LMARGIN", new_y="NEXT", align="C")
+        pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm sonuçlar", new_x="LMARGIN", new_y="NEXT", align="C")
         pdf_output.ln(5)
 
         for i, satir in enumerate(satirlar, 1):
-            pdf_output.multi_cell(0, 6, f"{i}. {satir}")
+            pdf_output.multi_cell(0, 5, f"{i}. {satir}")
             pdf_output.ln(3)
 
         pdf_output.output(output_path)

@@ -18,6 +18,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# TELEGRAM BOT TOKEN
+TOKEN = "8446108598:AAHc3BHITPo-kuxjz5rzzgCjmnoTxEzL62s"
+
 user_files = {}   # {user_id: pdf_path}
 user_busy = {}    # {user_id: True/False}
 
@@ -121,14 +124,12 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_output = FPDF()
         pdf_output.add_page()
 
-        # GitHub'a yüklediğin DejaVuSans.ttf fontunu kullanıyoruz
         font_path = os.path.join(os.path.dirname(__file__), 'DejaVuSans.ttf')
         
         if os.path.exists(font_path):
             pdf_output.add_font('DejaVu', '', font_path)
             pdf_output.set_font('DejaVu', '', 12)
         else:
-            # Font dosyası bulunamazsa varsayılan fonta geçer
             pdf_output.set_font('Helvetica', '', 12)
 
         header_text = f"'{keyword}' kelimesi ile bulunan tüm satırlar"
@@ -164,12 +165,7 @@ async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bilinmeyen komut. PDF gönderdikten sonra /search <kelime> kullanabilirsiniz.")
 
 def main():
-    # Token'ı Railway Environment Variable (BOT_TOKEN) üzerinden alır
-    token = os.environ.get("8446108598:AAHc3BHITPo-kuxjz5rzzgCjmnoTxEzL62s")
-    if not token:
-        raise ValueError("BOT_TOKEN ortam değişkeni bulunamadı! Railway Variables kısmından ayarlayın.")
-
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("search", search_pdf))

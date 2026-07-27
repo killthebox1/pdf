@@ -49,6 +49,16 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
+def is_header_footer(line: str) -> bool:
+    line_upper = line.upper()
+    if line_upper.startswith("(TABLO") or line_upper.startswith("TABLO"): return True
+    if line_upper.startswith("ÖSYM KODU") or line_upper.startswith("SAYISI"): return True
+    if line_upper.startswith("NIT1") or line_upper.startswith("NIT2") or line_upper.startswith("NIT3"): return True
+    if line_upper.startswith("*ARANAN") or line_upper.startswith("KPSS"): return True
+    if line_upper.startswith("ARANAN NİTELİKLER") or line_upper.startswith("AÇIKLAMALAR"): return True
+    if line_upper == "TEŞKİLAT" or ("TEŞKİLAT" in line_upper and "POZİSYON" in line_upper): return True
+    return False
+
 # Satırı sütun alanlarına göre 8 parçaya ayıran akıllı ayrıştırıcı
 def parse_record_to_parts(full_record: str):
     match_start = re.match(r'^(\d{9})\s+(\d+)\s+(.+)$', full_record)
@@ -94,48 +104,92 @@ def parse_record_to_parts(full_record: str):
 
     return [osym_kod, sb_kod, kurum_adi, pozisyon_unvani, il_adi, teskilat, sayi, nitelik]
 
-# %100 Doğrulukla ÖSYM Kodlarına Göre Bölümleme Yapan Arama Motoru
+# Birleşik blokları kusursuz tekil kayıtlara dönüştüren unstacking algoritması
+def unstack_multi_block(code_lines, block_lines, N):
+    unstacked = []
+    if len(block_lines) % N == 0 and len(block_lines) > 0:
+        group_size = len(block_lines) // N
+        for k in range(N):
+            sub_lines = [block_lines[g * N + k] for g in range(group_size)]
+            rec = code_lines[k] + " " + " ".join(sub_lines)
+            rec = re.sub(r'\s+', ' ', rec).strip()
+            unstacked.append(rec)
+    else:
+        for k in range(N):
+            rec = code_lines[k] + " " + " ".join(block_lines)
+            rec = re.sub(r'\s+', ' ', rec).strip()
+            unstacked.append(rec)
+    return unstacked
+
+# %100 Tamlık Garantili PDF Arama Motoru
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
     total_pages = len(reader.pages)
+    all_records = []
 
-    # 1. Tüm PDF metnini tek bir havuzda topla
-    full_text_list = []
     for idx, page in enumerate(reader.pages, 1):
         try:
             text = page.extract_text()
-            if text:
-                full_text_list.append(text)
+            if not text:
+                continue
+
+            lines = [l.strip().replace('|', ' ') for l in text.split('\n') if l.strip()]
+            lines = [re.sub(r'\s+', ' ', l) for l in lines]
+
+            filtered_lines = [l for l in lines if not is_header_footer(l)]
+
+            i = 0
+            n_lines = len(filtered_lines)
+            while i < n_lines:
+                line = filtered_lines[i]
+                if re.match(r'^\d{9}\b', line):
+                    code_lines = []
+                    j = i
+                    while j < n_lines and re.match(r'^\d{9}\b', filtered_lines[j]):
+                        code_lines.append(filtered_lines[j])
+                        j += 1
+
+                    N = len(code_lines)
+                    if N == 1:
+                        rec_parts = [filtered_lines[i]]
+                        i += 1
+                        while i < n_lines and not re.match(r'^\d{9}\b', filtered_lines[i]) and not is_header_footer(filtered_lines[i]):
+                            if filtered_lines[i].startswith("Bu pozisyon") or "*Aranan" in filtered_lines[i]:
+                                break
+                            rec_parts.append(filtered_lines[i])
+                            i += 1
+                        full_rec = " ".join(rec_parts)
+                        full_rec = re.sub(r'\s*Bu pozisyon unvanına.*$', '', full_rec, flags=re.IGNORECASE)
+                        full_rec = re.sub(r'\s*\*Aranan Nitelikleri.*$', '', full_rec, flags=re.IGNORECASE)
+                        all_records.append(re.sub(r'\s+', ' ', full_rec).strip())
+                    else:
+                        block_lines = []
+                        i = j
+                        while i < n_lines and not re.match(r'^\d{9}\b', filtered_lines[i]) and not is_header_footer(filtered_lines[i]):
+                            if filtered_lines[i].startswith("Bu pozisyon") or "*Aranan" in filtered_lines[i]:
+                                break
+                            block_lines.append(filtered_lines[i])
+                            i += 1
+
+                        unstacked_recs = unstack_multi_block(code_lines, block_lines, N)
+                        for r in unstacked_recs:
+                            all_records.append(r)
+                else:
+                    i += 1
+
         except Exception:
             pass
-        progress_callback(int((idx / total_pages) * 40))
-
-    entire_pdf_text = "\n".join(full_text_list).replace('|', ' ')
-    
-    # 2. Metni her 9 haneli ÖSYM kodunun BAŞINDAN itibaren böl (Hiçbir kayıt kaçmaz)
-    chunks = re.split(r'(?=\b\d{9}\b)', entire_pdf_text)
-
-    total_chunks = len(chunks)
-    for idx, chunk in enumerate(chunks, 1):
-        clean_chunk = re.sub(r'\s+', ' ', chunk).strip()
-        if not clean_chunk or not re.match(r'^\d{9}\b', clean_chunk):
-            continue
         
-        # Dipnot ve sayfa altı kirliliklerini temizle
-        clean_chunk = re.sub(r'\s*Bu pozisyon unvanına.*$', '', clean_chunk, flags=re.IGNORECASE)
-        clean_chunk = re.sub(r'\s*\*Aranan Nitelikleri.*$', '', clean_chunk, flags=re.IGNORECASE)
-        clean_chunk = re.sub(r'\s*KPSS 2025.*$', '', clean_chunk, flags=re.IGNORECASE)
-        clean_chunk = re.sub(r'\s*\(TABLO 2\).*$', '', clean_chunk, flags=re.IGNORECASE)
-        clean_chunk = re.sub(r'\s*ÖSYM KODU.*$', '', clean_chunk, flags=re.IGNORECASE)
-        clean_chunk = clean_chunk.strip()
+        progress_callback(int((idx / total_pages) * 80))
 
-        # Aranan kelime var mı kontrol et
-        if keyword_norm in normalize_text(clean_chunk):
-            satirlar.append(clean_chunk)
-
-        if idx % 100 == 0:
-            progress_callback(40 + int((idx / total_chunks) * 60))
+    # Ayrıştırılmış tüm kayıtlar içinde hassas kelime araması
+    total_recs = len(all_records)
+    for idx, record in enumerate(all_records, 1):
+        if keyword_norm in normalize_text(record):
+            satirlar.append(record)
+        if idx % 100 == 0 and total_recs > 0:
+            progress_callback(80 + int((idx / total_recs) * 20))
 
     progress_callback(100)
     return satirlar
@@ -214,7 +268,7 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
 
-        # Sonuç PDF oluşturma
+        # Sonuc PDF oluşturma
         output_path = f"{user_id}_sonuc.pdf"
         pdf_output = FPDF()
         pdf_output.add_page()

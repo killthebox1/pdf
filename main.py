@@ -18,8 +18,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# TELEGRAM BOT TOKEN
-TOKEN = "8446108598:AAHc3BHITPo-kuxjz5rzzgCjmnoTxEzL62s"
+# TELEGRAM BOT TOKEN (Önerilen: os.environ.get("BOT_TOKEN") kullanımıdır)
+TOKEN = os.getenv("BOT_TOKEN", "8446108598:AAHc3BHITPo-kuxjz5rzzgCjmnoTxEzL62s")
 
 user_files = {}   # {user_id: pdf_path}
 user_busy = {}    # {user_id: True/False}
@@ -36,7 +36,6 @@ def load_json_data():
             return {}
     return {}
 
-# GitHub'a yüklenen veriler.json dosyası otomatik okunur
 app_data = load_json_data()
 
 # --- Normalizasyon fonksiyonu ---
@@ -58,7 +57,7 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
     if user_busy.get(user_id, False):
-        await update.message.reply_text("Önceki işlem tamamlanmadı, lütfen bekleyin.")
+        await update.message.reply_text("Önceki işleminiz henüz tamamlanmadı, lütfen bekleyin.")
         return
 
     try:
@@ -74,21 +73,22 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
 
     if user_busy.get(user_id, False):
-        await update.message.reply_text("Önceki işlem tamamlanmadı, lütfen bekleyin.")
+        await update.message.reply_text("İşleminiz devam ediyor, lütfen bekleyin.")
         return
 
     file_path = user_files.get(user_id)
     if not file_path or not os.path.exists(file_path):
-        await update.message.reply_text("Lütfen önce PDF dosyanızı gönderin.")
+        await update.message.reply_text("Lütfen önce bir PDF dosyası gönderin.")
         return
 
     if len(context.args) == 0:
-        await update.message.reply_text("Lütfen aramak istediğiniz kelimeyi /search kelime şeklinde yazın.")
+        await update.message.reply_text("Lütfen aramak istediğiniz kelimeyi /search kelime şeklinde girin.")
         return
 
     user_busy[user_id] = True
     output_path = ""
     progress_msg = None
+    last_updated_progress = -1
 
     try:
         keyword = " ".join(context.args)
@@ -109,9 +109,11 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             satirlar.append(temiz_satir)
 
                 progress = int((idx / total_pages) * 100)
-                if progress % 10 == 0:
+                # Sadece ilerleme yüzde olarak %10 katlarına ulaştığında ve değiştiğinde Telegram API'ye istek at
+                if progress % 10 == 0 and progress != last_updated_progress:
                     try:
                         await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
+                        last_updated_progress = progress
                     except Exception:
                         pass
 
@@ -119,8 +121,10 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
 
-        # PDF oluşturma
-        output_path = f"{user_id}_{keyword}_sonuclar.pdf"
+        # Dosya ismindeki geçersiz karakterleri temizle
+        safe_keyword = re.sub(r'[^\w\-_]', '_', keyword)
+        output_path = f"{user_id}_{safe_keyword}_sonuclar.pdf"
+
         pdf_output = FPDF()
         pdf_output.add_page()
 
@@ -137,6 +141,9 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_output.ln(5)
 
         for i, satir in enumerate(satirlar, 1):
+            # Türkçe karakterlerin Latin1/Helvetica'da çökmesini önlemek için encode temizliği
+            if not os.path.exists(font_path):
+                satir = satir.encode('latin-1', 'replace').decode('latin-1')
             pdf_output.multi_cell(0, 8, f"{i}. {satir}")
             pdf_output.ln(1)
 
@@ -144,19 +151,18 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await progress_msg.edit_text("Arama tamamlandı ✅")
         with open(output_path, "rb") as f:
-            await update.message.reply_document(document=f, filename=f"{keyword}_sonuclar.pdf")
+            await update.message.reply_document(document=f, filename=f"{safe_keyword}_sonuclar.pdf")
 
     except Exception as e:
-        err_msg = f"Arama sırasında hata oluştu: {e}"
+        logging.error(f"Arama sırasında hata: {e}")
+        err_msg = f"Arama sırasında bir hata oluştu: {e}"
         if progress_msg:
             await progress_msg.edit_text(err_msg)
         else:
             await update.message.reply_text(err_msg)
 
     finally:
-        temp_file = user_files.pop(user_id, None)
-        if temp_file and os.path.exists(temp_file):
-            os.remove(temp_file)
+        # Arama bittiğinde temp dosyaları sil ve meşgul durumunu kaldır
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         user_busy[user_id] = False
@@ -172,7 +178,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("Bot başlatıldı ✅")
+    print("Bot başarıyla başlatıldı ✅")
     app.run_polling()
 
 if __name__ == "__main__":

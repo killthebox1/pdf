@@ -18,8 +18,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# TELEGRAM BOT TOKEN (Önerilen: os.environ.get("BOT_TOKEN") kullanımıdır)
-TOKEN = os.getenv("BOT_TOKEN", "8446108598:AAHc3BHITPo-kuxjz5rzzgCjmnoTxEzL62s")
+# TELEGRAM BOT TOKEN
+# Öncelik ortam değişkenindedir (BOT_TOKEN); tanımlı değilse yeni token'ı kullanır.
+TOKEN = os.getenv("BOT_TOKEN", "8834883881:AAEYOoaFEqWw3HtwCVl87R9UI2exXED18-s")
 
 user_files = {}   # {user_id: pdf_path}
 user_busy = {}    # {user_id: True/False}
@@ -109,7 +110,7 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             satirlar.append(temiz_satir)
 
                 progress = int((idx / total_pages) * 100)
-                # Sadece ilerleme yüzde olarak %10 katlarına ulaştığında ve değiştiğinde Telegram API'ye istek at
+                # İlerleme %10 ve katlarına ulaştığında yalnızca 1 kere mesajı güncelle
                 if progress % 10 == 0 and progress != last_updated_progress:
                     try:
                         await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
@@ -141,7 +142,6 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_output.ln(5)
 
         for i, satir in enumerate(satirlar, 1):
-            # Türkçe karakterlerin Latin1/Helvetica'da çökmesini önlemek için encode temizliği
             if not os.path.exists(font_path):
                 satir = satir.encode('latin-1', 'replace').decode('latin-1')
             pdf_output.multi_cell(0, 8, f"{i}. {satir}")
@@ -162,7 +162,6 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(err_msg)
 
     finally:
-        # Arama bittiğinde temp dosyaları sil ve meşgul durumunu kaldır
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         user_busy[user_id] = False
@@ -178,7 +177,7 @@ def main():
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("Bot başarıyla başlatıldı ✅")
+    print("Bot yeni token ile başarıyla başlatıldı ✅")
     app.run_polling()
 
 if __name__ == "__main__":

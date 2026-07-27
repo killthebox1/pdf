@@ -6,6 +6,8 @@ import re
 import json
 import logging
 import unicodedata
+import asyncio
+import time
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
@@ -18,8 +20,6 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# TELEGRAM BOT TOKEN
-# Öncelik ortam değişkenindedir (BOT_TOKEN); tanımlı değilse yeni token'ı kullanır.
 TOKEN = os.getenv("BOT_TOKEN", "8834883881:AAEYOoaFEqWw3HtwCVl87R9UI2exXED18-s")
 
 user_files = {}   # {user_id: pdf_path}
@@ -46,6 +46,28 @@ def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
+
+# --- Senkron Arama Fonksiyonu (Thread içinde çalışır, botu dondurmaz) ---
+def process_pdf_search(file_path, keyword_norm):
+    satirlar = []
+    total_pages = 0
+    
+    with pdfplumber.open(file_path) as pdf:
+        total_pages = len(pdf.pages)
+        for idx, sayfa in enumerate(pdf.pages, 1):
+            try:
+                metin = sayfa.extract_text()
+                if metin:
+                    for satir in metin.split("\n"):
+                        temiz_satir = re.sub(r'\s+', ' ', satir).strip()
+                        satir_norm = normalize_text(temiz_satir)
+                        if keyword_norm in satir_norm:
+                            satirlar.append(temiz_satir)
+            except Exception as page_err:
+                logging.warning(f"Sayfa {idx} okunurken hata: {page_err}")
+            
+            # Her sayfada ilerleme durumunu dışarıya aktarmak için jeneratör mantığı
+            yield idx, total_pages, satirlar
 
 # --- Bot komutları ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,40 +111,39 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_busy[user_id] = True
     output_path = ""
     progress_msg = None
-    last_updated_progress = -1
 
     try:
         keyword = " ".join(context.args)
         keyword_norm = normalize_text(keyword)
         satirlar = []
 
-        with pdfplumber.open(file_path) as pdf:
-            total_pages = len(pdf.pages)
-            progress_msg = await update.message.reply_text("Arama başladı... %0")
+        progress_msg = await update.message.reply_text("Arama başladı... %0")
+        last_edit_time = time.time()
 
-            for idx, sayfa in enumerate(pdf.pages, 1):
-                metin = sayfa.extract_text()
-                if metin:
-                    for satir in metin.split("\n"):
-                        temiz_satir = re.sub(r'\s+', ' ', satir).strip()
-                        satir_norm = normalize_text(temiz_satir)
-                        if keyword_norm in satir_norm:
-                            satirlar.append(temiz_satir)
+        # PDF okuma işlemini asenkron döngüde çalıştırıyoruz
+        def run_search():
+            return list(process_pdf_search(file_path, keyword_norm))
 
-                progress = int((idx / total_pages) * 100)
-                # İlerleme %10 ve katlarına ulaştığında yalnızca 1 kere mesajı güncelle
-                if progress % 10 == 0 and progress != last_updated_progress:
-                    try:
-                        await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
-                        last_updated_progress = progress
-                    except Exception:
-                        pass
+        # Ağır işlemi thread'e gönderiyoruz
+        results = await asyncio.to_thread(run_search)
+
+        for idx, total_pages, current_satirlar in results:
+            satirlar = current_satirlar
+            progress = int((idx / total_pages) * 100)
+            
+            # Telegram API kilitlenmesini önlemek için en az 3 saniyede bir mesaj güncelle
+            current_time = time.time()
+            if (current_time - last_edit_time) > 3 or progress == 100:
+                try:
+                    await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
+                    last_edit_time = current_time
+                except Exception:
+                    pass
 
         if not satirlar:
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
 
-        # Dosya ismindeki geçersiz karakterleri temizle
         safe_keyword = re.sub(r'[^\w\-_]', '_', keyword)
         output_path = f"{user_id}_{safe_keyword}_sonuclar.pdf"
 
@@ -130,7 +151,6 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_output.add_page()
 
         font_path = os.path.join(os.path.dirname(__file__), 'DejaVuSans.ttf')
-        
         if os.path.exists(font_path):
             pdf_output.add_font('DejaVu', '', font_path)
             pdf_output.set_font('DejaVu', '', 12)
@@ -177,8 +197,8 @@ def main():
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    print("Bot yeni token ile başarıyla başlatıldı ✅")
-    app.run_polling()
+    print("Bot başarıyla başlatıldı ✅")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

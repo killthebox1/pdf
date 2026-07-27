@@ -20,7 +20,7 @@ user_busy = {}    # {user_id: True/False}
 
 FONT_PATH = "DejaVuSans.ttf"
 
-# Her alan için özel RGB renk paleti
+# Her sütun için özel RGB renk paleti
 PART_COLORS = [
     (200, 0, 0),     # 1. ÖSYM Kodu -> Kırmızı
     (0, 102, 204),   # 2. SB Kodu -> Mavi
@@ -49,17 +49,22 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
+# Tablo başlıkları ve dipnot temizleme kontrolü
 def is_header_footer(line: str) -> bool:
-    line_upper = line.upper()
+    line_upper = line.upper().strip()
+    if not line_upper:
+        return True
     if line_upper.startswith("(TABLO") or line_upper.startswith("TABLO"): return True
     if line_upper.startswith("ÖSYM KODU") or line_upper.startswith("SAYISI"): return True
     if line_upper.startswith("NIT1") or line_upper.startswith("NIT2") or line_upper.startswith("NIT3"): return True
     if line_upper.startswith("*ARANAN") or line_upper.startswith("KPSS"): return True
     if line_upper.startswith("ARANAN NİTELİKLER") or line_upper.startswith("AÇIKLAMALAR"): return True
+    if line_upper.startswith("BU POZİSYON"): return True
     if line_upper == "TEŞKİLAT" or ("TEŞKİLAT" in line_upper and "POZİSYON" in line_upper): return True
+    if line_upper.isdigit() and len(line_upper) <= 3: return True  # Sayfa numaraları
     return False
 
-# Satırı sütun alanlarına göre 8 parçaya ayıran akıllı ayrıştırıcı
+# Satırı 8 renkli sütuna ayıran akıllı ayrıştırıcı
 def parse_record_to_parts(full_record: str):
     match_start = re.match(r'^(\d{9})\s+(\d+)\s+(.+)$', full_record)
     if not match_start:
@@ -104,24 +109,7 @@ def parse_record_to_parts(full_record: str):
 
     return [osym_kod, sb_kod, kurum_adi, pozisyon_unvani, il_adi, teskilat, sayi, nitelik]
 
-# Birleşik blokları kusursuz tekil kayıtlara dönüştüren unstacking algoritması
-def unstack_multi_block(code_lines, block_lines, N):
-    unstacked = []
-    if len(block_lines) % N == 0 and len(block_lines) > 0:
-        group_size = len(block_lines) // N
-        for k in range(N):
-            sub_lines = [block_lines[g * N + k] for g in range(group_size)]
-            rec = code_lines[k] + " " + " ".join(sub_lines)
-            rec = re.sub(r'\s+', ' ', rec).strip()
-            unstacked.append(rec)
-    else:
-        for k in range(N):
-            rec = code_lines[k] + " " + " ".join(block_lines)
-            rec = re.sub(r'\s+', ' ', rec).strip()
-            unstacked.append(rec)
-    return unstacked
-
-# %100 Tamlık Garantili PDF Arama Motoru
+# Kusursuz Ayrıştırma ve Arama Motoru
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
@@ -134,10 +122,10 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
             if not text:
                 continue
 
-            lines = [l.strip().replace('|', ' ') for l in text.split('\n') if l.strip()]
-            lines = [re.sub(r'\s+', ' ', l) for l in lines]
+            raw_lines = [l.strip().replace('|', ' ') for l in text.split('\n') if l.strip()]
+            raw_lines = [re.sub(r'\s+', ' ', l) for l in raw_lines]
 
-            filtered_lines = [l for l in lines if not is_header_footer(l)]
+            filtered_lines = [l for l in raw_lines if not is_header_footer(l)]
 
             i = 0
             n_lines = len(filtered_lines)
@@ -146,35 +134,32 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
                 if re.match(r'^\d{9}\b', line):
                     code_lines = []
                     j = i
+                    # Peş peşe gelen ÖSYM kodlarını topla (N adet)
                     while j < n_lines and re.match(r'^\d{9}\b', filtered_lines[j]):
-                        code_lines.append(filtered_lines[j])
+                        code_lines.append(filtered_lines[j].split()[0])
                         j += 1
 
                     N = len(code_lines)
-                    if N == 1:
-                        rec_parts = [filtered_lines[i]]
+                    block_lines = []
+                    i = j
+                    # Kodlardan sonra gelen hücre değerlerini topla
+                    while i < n_lines and not re.match(r'^\d{9}\b', filtered_lines[i]) and not is_header_footer(filtered_lines[i]):
+                        block_lines.append(filtered_lines[i])
                         i += 1
-                        while i < n_lines and not re.match(r'^\d{9}\b', filtered_lines[i]) and not is_header_footer(filtered_lines[i]):
-                            if filtered_lines[i].startswith("Bu pozisyon") or "*Aranan" in filtered_lines[i]:
-                                break
-                            rec_parts.append(filtered_lines[i])
-                            i += 1
-                        full_rec = " ".join(rec_parts)
-                        full_rec = re.sub(r'\s*Bu pozisyon unvanına.*$', '', full_rec, flags=re.IGNORECASE)
-                        full_rec = re.sub(r'\s*\*Aranan Nitelikleri.*$', '', full_rec, flags=re.IGNORECASE)
+
+                    # ÇOKLU KODLARI BİRBİRİNE KARIŞTIRMADAN AYRIŞTIR (Round-Robin)
+                    if N == 1:
+                        full_rec = code_lines[0] + " " + " ".join(block_lines)
                         all_records.append(re.sub(r'\s+', ' ', full_rec).strip())
                     else:
-                        block_lines = []
-                        i = j
-                        while i < n_lines and not re.match(r'^\d{9}\b', filtered_lines[i]) and not is_header_footer(filtered_lines[i]):
-                            if filtered_lines[i].startswith("Bu pozisyon") or "*Aranan" in filtered_lines[i]:
-                                break
-                            block_lines.append(filtered_lines[i])
-                            i += 1
-
-                        unstacked_recs = unstack_multi_block(code_lines, block_lines, N)
-                        for r in unstacked_recs:
-                            all_records.append(r)
+                        record_parts = [[code_lines[k]] for k in range(N)]
+                        for b_idx, b_line in enumerate(block_lines):
+                            k = b_idx % N  # Doğru satırı doğru koda atar
+                            record_parts[k].append(b_line)
+                        
+                        for k in range(N):
+                            full_rec = " ".join(record_parts[k])
+                            all_records.append(re.sub(r'\s+', ' ', full_rec).strip())
                 else:
                     i += 1
 
@@ -183,7 +168,7 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
         
         progress_callback(int((idx / total_pages) * 80))
 
-    # Ayrıştırılmış tüm kayıtlar içinde hassas kelime araması
+    # Sadece ve sadece istenen kelimenin geçtiği kayıtları süz
     total_recs = len(all_records)
     for idx, record in enumerate(all_records, 1):
         if keyword_norm in normalize_text(record):
@@ -268,7 +253,7 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
 
-        # Sonuc PDF oluşturma
+        # Sonuç PDF oluşturma
         output_path = f"{user_id}_sonuc.pdf"
         pdf_output = FPDF()
         pdf_output.add_page()

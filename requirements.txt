@@ -1,5 +1,3 @@
 python-telegram-bot
-html2image==2.0.5
-pdfplumber
+PyMuPDF
 fpdf2
-Pillow

@@ -20,16 +20,16 @@ user_busy = {}    # {user_id: True/False}
 
 FONT_PATH = "DejaVuSans.ttf"
 
-# Her sütun için özel RGB renk paleti
+# Kelimelerin sırayla boyanacağı 8 farklı canlı renk
 PART_COLORS = [
-    (200, 0, 0),     # 1. ÖSYM Kodu -> Kırmızı
-    (0, 102, 204),   # 2. SB Kodu -> Mavi
-    (0, 128, 0),     # 3. Kurum Adı -> Yeşil
-    (128, 0, 128),   # 4. Pozisyon Unvanı -> Mor
-    (230, 115, 0),   # 5. İl Adı -> Turuncu
-    (0, 150, 150),   # 6. Teşkilat -> Turkuaz
-    (200, 0, 100),   # 7. Pozisyon Sayısı -> Bordo/Pembe
-    (0, 0, 128)      # 8. Nitelik Kodları -> Lacivert
+    (200, 0, 0),     # 1. Kırmızı
+    (0, 102, 204),   # 2. Mavi
+    (0, 128, 0),     # 3. Yeşil
+    (128, 0, 128),   # 4. Mor
+    (230, 115, 0),   # 5. Turuncu
+    (0, 150, 150),   # 6. Turkuaz
+    (200, 0, 100),   # 7. Bordo
+    (0, 0, 128)      # 8. Lacivert
 ]
 
 def ensure_font_exists():
@@ -49,134 +49,31 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# Tablo başlıkları ve dipnot temizleme kontrolü
-def is_header_footer(line: str) -> bool:
-    line_upper = line.upper().strip()
-    if not line_upper:
-        return True
-    if line_upper.startswith("(TABLO") or line_upper.startswith("TABLO"): return True
-    if line_upper.startswith("ÖSYM KODU") or line_upper.startswith("SAYISI"): return True
-    if line_upper.startswith("NIT1") or line_upper.startswith("NIT2") or line_upper.startswith("NIT3"): return True
-    if line_upper.startswith("*ARANAN") or line_upper.startswith("KPSS"): return True
-    if line_upper.startswith("ARANAN NİTELİKLER") or line_upper.startswith("AÇIKLAMALAR"): return True
-    if line_upper.startswith("BU POZİSYON"): return True
-    if line_upper == "TEŞKİLAT" or ("TEŞKİLAT" in line_upper and "POZİSYON" in line_upper): return True
-    if line_upper.isdigit() and len(line_upper) <= 3: return True  # Sayfa numaraları
-    return False
-
-# Satırı 8 renkli sütuna ayıran akıllı ayrıştırıcı
-def parse_record_to_parts(full_record: str):
-    match_start = re.match(r'^(\d{9})\s+(\d+)\s+(.+)$', full_record)
-    if not match_start:
-        return [full_record]
-
-    osym_kod = match_start.group(1)
-    sb_kod = match_start.group(2)
-    rest = match_start.group(3)
-
-    match_end = re.search(r'^(.*?)\s+(TAŞRA|TASRA|MERKEZ)\s+(\d+)\s+([\d\s]{4,})(.*)$', rest)
-    if not match_end:
-        return [osym_kod, sb_kod, rest]
-
-    middle_text = match_end.group(1).strip()
-    teskilat = match_end.group(2)
-    sayi = match_end.group(3)
-    nitelik = match_end.group(4).strip()
-
-    unvanlar = [
-        r"SAĞLIK TEKNİKERİ\s*\(.*?\)", r"SAĞLIK TEKNİKERİ", r"TEKNİKER", r"SAĞLIK MEMURU\s*\(.*?\)", r"SAĞLIK MEMURU", 
-        r"HEMŞİRE", r"EBE", r"BİYOLOG", r"ÇOCUK GELİŞİMCİSİ", r"DİYETİSYEN", 
-        r"FİZYOTERAPİST", r"PSİKOLOG", r"SAĞLIK FİZİKÇİSİ", r"SOSYAL ÇALIŞMACI", 
-        r"MÜHENDİS", r"MİMAR", r"ŞEHİR PLANCISI", r"BÜRO PERSONELİ", r"ŞOFÖR", r"AŞÇI", r"HİZMETLİ"
-    ]
-    unvan_pattern = r'\s+(' + '|'.join(unvanlar) + r')\s+'
-    title_match = re.search(unvan_pattern, middle_text)
-    
-    if title_match:
-        kurum_adi = middle_text[:title_match.start()].strip()
-        pozisyon_unvani = title_match.group(1).strip()
-        il_adi = middle_text[title_match.end():].strip()
-    else:
-        parts = middle_text.rsplit(' ', 1)
-        if len(parts) == 2:
-            kurum_adi = parts[0]
-            pozisyon_unvani = ""
-            il_adi = parts[1]
-        else:
-            kurum_adi = middle_text
-            pozisyon_unvani = ""
-            il_adi = ""
-
-    return [osym_kod, sb_kod, kurum_adi, pozisyon_unvani, il_adi, teskilat, sayi, nitelik]
-
-# Kusursuz Ayrıştırma ve Arama Motoru
+# YALIN VE SAF ARAMA MOTORU (Tıpkı Ctrl+F Gibi)
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
     total_pages = len(reader.pages)
-    all_records = []
 
     for idx, page in enumerate(reader.pages, 1):
         try:
             text = page.extract_text()
-            if not text:
-                continue
-
-            raw_lines = [l.strip().replace('|', ' ') for l in text.split('\n') if l.strip()]
-            raw_lines = [re.sub(r'\s+', ' ', l) for l in raw_lines]
-
-            filtered_lines = [l for l in raw_lines if not is_header_footer(l)]
-
-            i = 0
-            n_lines = len(filtered_lines)
-            while i < n_lines:
-                line = filtered_lines[i]
-                if re.match(r'^\d{9}\b', line):
-                    code_lines = []
-                    j = i
-                    # Peş peşe gelen ÖSYM kodlarını topla (N adet)
-                    while j < n_lines and re.match(r'^\d{9}\b', filtered_lines[j]):
-                        code_lines.append(filtered_lines[j].split()[0])
-                        j += 1
-
-                    N = len(code_lines)
-                    block_lines = []
-                    i = j
-                    # Kodlardan sonra gelen hücre değerlerini topla
-                    while i < n_lines and not re.match(r'^\d{9}\b', filtered_lines[i]) and not is_header_footer(filtered_lines[i]):
-                        block_lines.append(filtered_lines[i])
-                        i += 1
-
-                    # ÇOKLU KODLARI BİRBİRİNE KARIŞTIRMADAN AYRIŞTIR (Round-Robin)
-                    if N == 1:
-                        full_rec = code_lines[0] + " " + " ".join(block_lines)
-                        all_records.append(re.sub(r'\s+', ' ', full_rec).strip())
-                    else:
-                        record_parts = [[code_lines[k]] for k in range(N)]
-                        for b_idx, b_line in enumerate(block_lines):
-                            k = b_idx % N  # Doğru satırı doğru koda atar
-                            record_parts[k].append(b_line)
+            if text:
+                for line in text.split('\n'):
+                    clean_line = line.replace('|', ' ').strip()
+                    clean_line = re.sub(r'\s+', ' ', clean_line)
+                    
+                    if not clean_line:
+                        continue
                         
-                        for k in range(N):
-                            full_rec = " ".join(record_parts[k])
-                            all_records.append(re.sub(r'\s+', ' ', full_rec).strip())
-                else:
-                    i += 1
-
+                    # Aranan kelime satırda geçiyorsa aynen al
+                    if keyword_norm in normalize_text(clean_line):
+                        satirlar.append(clean_line)
         except Exception:
             pass
         
-        progress_callback(int((idx / total_pages) * 80))
+        progress_callback(int((idx / total_pages) * 100))
 
-    # Sadece ve sadece istenen kelimenin geçtiği kayıtları süz
-    total_recs = len(all_records)
-    for idx, record in enumerate(all_records, 1):
-        if keyword_norm in normalize_text(record):
-            satirlar.append(record)
-        if idx % 100 == 0 and total_recs > 0:
-            progress_callback(80 + int((idx / total_recs) * 20))
-
-    progress_callback(100)
     return satirlar
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,29 +162,29 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             pdf_output.set_font('Helvetica', '', 9)
 
-        pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm sonuçlar ({len(satirlar)} Kayıt)", new_x="LMARGIN", new_y="NEXT", align="C")
+        pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm sonuçlar ({len(satirlar)} Satır)", new_x="LMARGIN", new_y="NEXT", align="C")
         pdf_output.ln(5)
 
+        # HER SATIRI OLDUĞU GİBİ RENKLİ YAZDIRMA
         for i, satir in enumerate(satirlar, 1):
-            parts = parse_record_to_parts(satir)
-            
-            # SIRA NUMARASI
+            # SIRA NUMARASI (Siyah)
             pdf_output.set_text_color(0, 0, 0)
             pdf_output.write(5, f"{i}. ")
 
-            # RENKLİ SÜTUN YAZDIRMA (PARANTEZSİZ)
-            for p_idx, part in enumerate(parts):
-                if not part:
+            # SATIRDAKİ KELİMELERİ SIRA İLE FARKLI RENKLERDE YAZDIR
+            words = satir.split(' ')
+            for w_idx, word in enumerate(words):
+                if not word:
                     continue
-                color = PART_COLORS[p_idx % len(PART_COLORS)]
+                color = PART_COLORS[w_idx % len(PART_COLORS)]
                 pdf_output.set_text_color(*color)
-                pdf_output.write(5, f"{part} ")
+                pdf_output.write(5, f"{word} ")
 
-            pdf_output.ln(8)
+            pdf_output.ln(7) # Satır sonu
 
         pdf_output.output(output_path)
 
-        await progress_msg.edit_text(f"Arama tamamlandı ✅ Toplam {len(satirlar)} kayıt bulundu.")
+        await progress_msg.edit_text(f"Arama tamamlandı ✅ Toplam {len(satirlar)} sonuç bulundu.")
         with open(output_path, "rb") as f:
             await update.message.reply_document(document=f, filename=f"{keyword}_sonuclar.pdf")
 

@@ -11,7 +11,7 @@ import time
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import pdfplumber
+import fitz  # PyMuPDF (Çok hızlı PDF okuma)
 from fpdf import FPDF
 
 # Log ayarları
@@ -25,20 +25,6 @@ TOKEN = os.getenv("BOT_TOKEN", "8834883881:AAEYOoaFEqWw3HtwCVl87R9UI2exXED18-s")
 user_files = {}   # {user_id: pdf_path}
 user_busy = {}    # {user_id: True/False}
 
-# --- JSON Veri Yükleyici ---
-def load_json_data():
-    json_path = os.path.join(os.path.dirname(__file__), 'veriler.json')
-    if os.path.exists(json_path):
-        try:
-            with open(json_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logging.error(f"JSON okuma hatası: {e}")
-            return {}
-    return {}
-
-app_data = load_json_data()
-
 # --- Normalizasyon fonksiyonu ---
 def normalize_text(text: str) -> str:
     if not text:
@@ -47,27 +33,23 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# --- Senkron Arama Fonksiyonu (Thread içinde çalışır, botu dondurmaz) ---
-def process_pdf_search(file_path, keyword_norm):
+# --- Senkron Arama Fonksiyonu (PyMuPDF ile ultra hızlı) ---
+def search_in_pdf_fast(file_path, keyword_norm):
     satirlar = []
-    total_pages = 0
-    
-    with pdfplumber.open(file_path) as pdf:
-        total_pages = len(pdf.pages)
-        for idx, sayfa in enumerate(pdf.pages, 1):
-            try:
-                metin = sayfa.extract_text()
-                if metin:
-                    for satir in metin.split("\n"):
-                        temiz_satir = re.sub(r'\s+', ' ', satir).strip()
-                        satir_norm = normalize_text(temiz_satir)
-                        if keyword_norm in satir_norm:
-                            satirlar.append(temiz_satir)
-            except Exception as page_err:
-                logging.warning(f"Sayfa {idx} okunurken hata: {page_err}")
-            
-            # Her sayfada ilerleme durumunu dışarıya aktarmak için jeneratör mantığı
-            yield idx, total_pages, satirlar
+    doc = fitz.open(file_path)
+    total_pages = len(doc)
+
+    for idx, page in enumerate(doc, 1):
+        metin = page.get_text("text")
+        if metin:
+            for satir in metin.split("\n"):
+                temiz_satir = re.sub(r'\s+', ' ', satir).strip()
+                satir_norm = normalize_text(temiz_satir)
+                if keyword_norm in satir_norm:
+                    satirlar.append(temiz_satir)
+                    
+    doc.close()
+    return satirlar, total_pages
 
 # --- Bot komutları ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -115,34 +97,17 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         keyword = " ".join(context.args)
         keyword_norm = normalize_text(keyword)
-        satirlar = []
 
-        progress_msg = await update.message.reply_text("Arama başladı... %0")
-        last_edit_time = time.time()
+        progress_msg = await update.message.reply_text("Arama yapılıyor, lütfen bekleyin...")
 
-        # PDF okuma işlemini asenkron döngüde çalıştırıyoruz
-        def run_search():
-            return list(process_pdf_search(file_path, keyword_norm))
-
-        # Ağır işlemi thread'e gönderiyoruz
-        results = await asyncio.to_thread(run_search)
-
-        for idx, total_pages, current_satirlar in results:
-            satirlar = current_satirlar
-            progress = int((idx / total_pages) * 100)
-            
-            # Telegram API kilitlenmesini önlemek için en az 3 saniyede bir mesaj güncelle
-            current_time = time.time()
-            if (current_time - last_edit_time) > 3 or progress == 100:
-                try:
-                    await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
-                    last_edit_time = current_time
-                except Exception:
-                    pass
+        # Hızlı arama fonksiyonunu arka plan thread'inde çalıştır
+        satirlar, total_pages = await asyncio.to_thread(search_in_pdf_fast, file_path, keyword_norm)
 
         if not satirlar:
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
+
+        await progress_msg.edit_text(f"Toplam {len(satirlar)} sonuç bulundu. Sonuç PDF'i oluşturuluyor...")
 
         safe_keyword = re.sub(r'[^\w\-_]', '_', keyword)
         output_path = f"{user_id}_{safe_keyword}_sonuclar.pdf"

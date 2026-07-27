@@ -20,6 +20,18 @@ user_busy = {}    # {user_id: True/False}
 
 FONT_PATH = "DejaVuSans.ttf"
 
+# Her bölüm için özel RGB renk paleti
+PART_COLORS = [
+    (192, 0, 0),     # 1. ÖSYM Kodu -> Kırmızı
+    (0, 102, 204),   # 2. SB Kodu -> Mavi
+    (0, 128, 0),     # 3. Kurum Adı -> Yeşil
+    (112, 48, 160),  # 4. Pozisyon Unvanı -> Mor
+    (226, 107, 10),  # 5. İl Adı -> Turuncu
+    (0, 128, 128),   # 6. Teşkilat -> Camgöbeği
+    (192, 0, 128),   # 7. Pozisyon Sayısı -> Bordo
+    (31, 78, 121)    # 8. Nitelik Kodları -> Lacivert
+]
+
 def ensure_font_exists():
     if not os.path.exists(FONT_PATH):
         print("DejaVuSans.ttf indiriliyor...")
@@ -37,7 +49,44 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# ÖSYM Kadro Koduna Göre Satırları Mükemmel Birleştiren Arama Motoru
+# Satırı sütun alanlarına göre mantıksal parçalara ayıran parser
+def parse_record_to_parts(full_record: str):
+    match_start = re.match(r'^(\d{9})\s+(\d+)\s+(.+)$', full_record)
+    if not match_start:
+        return [full_record]
+
+    osym_kod = match_start.group(1)
+    sb_kod = match_start.group(2)
+    rest = match_start.group(3)
+
+    match_end = re.search(r'^(.*?)\s+(TAŞRA|TASRA|MERKEZ)\s+(\d+)\s+([\d\s]+)$', rest)
+    if not match_end:
+        return [osym_kod, sb_kod, rest]
+
+    middle_text = match_end.group(1).strip()
+    teskilat = match_end.group(2)
+    sayi = match_end.group(3)
+    nitelik = match_end.group(4)
+
+    title_match = re.search(r'\s+(SAĞLIK TEKNİKERİ\s*\(.*?\)|SAĞLIK TEKNİKERİ|TEKNİKER|MÜHENDİS|HEMŞİRE|EBE|MEMUR|ŞÖFÖR|AŞÇI|HİZMETLİ)\s+', middle_text)
+    
+    if title_match:
+        kurum_adi = middle_text[:title_match.start()].strip()
+        pozisyon_unvani = title_match.group(1).strip()
+        il_adi = middle_text[title_match.end():].strip()
+    else:
+        parts = middle_text.rsplit(' ', 1)
+        if len(parts) == 2:
+            kurum_adi = parts[0]
+            pozisyon_unvani = ""
+            il_adi = parts[1]
+        else:
+            kurum_adi = middle_text
+            pozisyon_unvani = ""
+            il_adi = ""
+
+    return [osym_kod, sb_kod, kurum_adi, pozisyon_unvani, il_adi, teskilat, sayi, nitelik]
+
 def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
     satirlar = []
     reader = PdfReader(file_path)
@@ -51,7 +100,6 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
                 current_record = []
                 
                 for line in lines:
-                    # '||' karakterlerini ve lüzumsuz boşlukları temizle
                     clean_line = line.replace('|', ' ').strip()
                     clean_line = re.sub(r'\s+', ' ', clean_line)
                     
@@ -59,12 +107,10 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
                         continue
                     
                     words = clean_line.split()
-                    # 9 haneli ÖSYM Kodu tespiti (Örn: 205010710 ile başlayan satırlar)
                     is_new_osym_code = False
                     if words and len(words[0]) == 9 and words[0].isdigit():
                         is_new_osym_code = True
 
-                    # Yeni bir kadro kaydına geçildiyse veya dipnot/başlık geldiyse önceki kaydı işle
                     if is_new_osym_code or clean_line.startswith("Bu pozisyon") or "KPSS" in clean_line or "*Aranan" in clean_line or "ÖSYM KODU" in clean_line:
                         if current_record:
                             full_record = " ".join(current_record)
@@ -73,13 +119,11 @@ def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
                                 satirlar.append(full_record)
                             current_record = []
                     
-                    # Kayıt toplama mantığı
                     if is_new_osym_code:
                         current_record.append(clean_line)
                     elif current_record and not (clean_line.startswith("Bu pozisyon") or "KPSS" in clean_line or "*Aranan" in clean_line or "ÖSYM KODU" in clean_line):
                         current_record.append(clean_line)
 
-                # Sayfa sonundaki son kaydı kontrol et
                 if current_record:
                     full_record = " ".join(current_record)
                     full_record = re.sub(r'\s+', ' ', full_record).strip()
@@ -183,9 +227,23 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_output.cell(0, 10, f"'{keyword}' kelimesi ile bulunan tüm sonuçlar", new_x="LMARGIN", new_y="NEXT", align="C")
         pdf_output.ln(5)
 
+        # Parantezsiz, Sadece Renkli Çıktı Yazdırma
         for i, satir in enumerate(satirlar, 1):
-            pdf_output.multi_cell(0, 5, f"{i}. {satir}")
-            pdf_output.ln(2)
+            parts = parse_record_to_parts(satir)
+            
+            # SIRA NUMARASI (Siyah)
+            pdf_output.set_text_color(0, 0, 0)
+            pdf_output.write(5, f"{i}. ")
+
+            # HER PARÇAYI KENDİ RENGİYLE YAZ (PARANTEZSİZ)
+            for p_idx, part in enumerate(parts):
+                if not part:
+                    continue
+                color = PART_COLORS[p_idx % len(PART_COLORS)]
+                pdf_output.set_text_color(*color)
+                pdf_output.write(5, f"{part} ")
+
+            pdf_output.ln(7) # Satır arası boşluk
 
         pdf_output.output(output_path)
 

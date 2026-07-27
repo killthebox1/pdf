@@ -3,14 +3,14 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import pdfplumber
+from pypdf import PdfReader
 from fpdf import FPDF
 import os
 import re
 import unicodedata
 import urllib.request
 import asyncio
-import gc
+import concurrent.futures
 
 # Bot Token
 TOKEN = "8834883881:AAEYOoaFEqWw3HtwCVl87R9UI2exXED18-s"
@@ -36,6 +36,30 @@ def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
+
+# Senkron PDF Arama Fonksiyonu (Arka planda thread olarak çalışır)
+def search_pdf_blocking(file_path: str, keyword_norm: str, progress_callback):
+    satirlar = []
+    reader = PdfReader(file_path)
+    total_pages = len(reader.pages)
+
+    for idx, page in enumerate(reader.pages, 1):
+        try:
+            metin = page.extract_text()
+            if metin:
+                for satir in metin.split("\n"):
+                    temiz_satir = re.sub(r'\s+', ' ', satir).strip()
+                    satir_norm = normalize_text(temiz_satir)
+                    if keyword_norm in satir_norm:
+                        satirlar.append(temiz_satir)
+        except Exception:
+            pass
+        
+        # İlerleme durumunu callback ile ilet
+        progress = int((idx / total_pages) * 100)
+        progress_callback(progress)
+
+    return satirlar
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -89,45 +113,25 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         keyword = " ".join(context.args)
         keyword_norm = normalize_text(keyword)
-        satirlar = []
 
         progress_msg = await update.message.reply_text("Arama başladı... %0")
+        
+        last_reported_progress = [0]
+        loop = asyncio.get_running_loop()
 
-        # PDF tarama işlemini asenkron döküm ile yapıyoruz
-        with pdfplumber.open(file_path) as pdf:
-            total_pages = len(pdf.pages)
-            last_reported_progress = 0
+        # İlerleme mesajını Telegram'a bildiren yardımcı fonksiyon
+        def progress_callback(progress):
+            if progress >= last_reported_progress[0] + 25 or progress == 100:
+                last_reported_progress[0] = progress
+                asyncio.run_coroutine_threadsafe(
+                    update_progress_ui(progress_msg, progress), loop
+                )
 
-            for idx, sayfa in enumerate(pdf.pages, 1):
-                # Sayfa metnini al
-                metin = sayfa.extract_text()
-                if metin:
-                    for satir in metin.split("\n"):
-                        temiz_satir = re.sub(r'\s+', ' ', satir).strip()
-                        satir_norm = normalize_text(temiz_satir)
-                        if keyword_norm in satir_norm:
-                            satirlar.append(temiz_satir)
-
-                # Bellek temizliği (RAM şişmesini engeller)
-                sayfa.flush_cache()
-
-                # Yüzde hesabı
-                progress = int((idx / total_pages) * 100)
-
-                # Her %20 değişimde bir mesaj güncelle (Rate limit & donma önleyici)
-                if progress >= last_reported_progress + 20 or idx == total_pages:
-                    last_reported_progress = progress
-                    try:
-                        await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
-                    except Exception:
-                        pass
-                
-                # Her 10 sayfada bir event loop'a nefes aldır (Railway timeout düşmesini engeller)
-                if idx % 10 == 0:
-                    await asyncio.sleep(0.01)
-
-        # Çöp toplayıcıyı çalıştır
-        gc.collect()
+        # PDF aramasını ayrı bir Thread içinde çalıştır (Arayüz kilitlenmez)
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            satirlar = await loop.run_in_executor(
+                executor, search_pdf_blocking, file_path, keyword_norm, progress_callback
+            )
 
         if not satirlar:
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
@@ -171,6 +175,12 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
         user_busy[user_id] = False
+
+async def update_progress_ui(msg, progress):
+    try:
+        await msg.edit_text(f"Arama devam ediyor... %{progress}")
+    except Exception:
+        pass
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bilinmeyen komut. PDF gönderdikten sonra /search <kelime> kullanabilirsiniz.")

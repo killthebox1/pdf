@@ -7,11 +7,10 @@ import json
 import logging
 import unicodedata
 import asyncio
-import time
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-import fitz  # PyMuPDF (Çok hızlı PDF okuma)
+import fitz  # PyMuPDF (Hızlı ve donmayan metin okuma)
 from fpdf import FPDF
 
 # Log ayarları
@@ -20,10 +19,25 @@ logging.basicConfig(
     level=logging.INFO
 )
 
+# TOKEN
 TOKEN = os.getenv("BOT_TOKEN", "8834883881:AAEYOoaFEqWw3HtwCVl87R9UI2exXED18-s")
 
 user_files = {}   # {user_id: pdf_path}
 user_busy = {}    # {user_id: True/False}
+
+# --- JSON Veri Yükleyici ---
+def load_json_data():
+    json_path = os.path.join(os.path.dirname(__file__), 'veriler.json')
+    if os.path.exists(json_path):
+        try:
+            with open(json_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logging.error(f"JSON okuma hatası: {e}")
+            return {}
+    return {}
+
+app_data = load_json_data()
 
 # --- Normalizasyon fonksiyonu ---
 def normalize_text(text: str) -> str:
@@ -33,23 +47,24 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# --- Senkron Arama Fonksiyonu (PyMuPDF ile ultra hızlı) ---
-def search_in_pdf_fast(file_path, keyword_norm):
+# --- Satır Bazlı Arama Fonksiyonu ---
+def search_lines_in_pdf(file_path, keyword_norm):
     satirlar = []
     doc = fitz.open(file_path)
-    total_pages = len(doc)
 
-    for idx, page in enumerate(doc, 1):
+    for page in doc:
         metin = page.get_text("text")
         if metin:
+            # Tıpkı eski koddaki gibi metni satırlara ayırıyoruz
             for satir in metin.split("\n"):
                 temiz_satir = re.sub(r'\s+', ' ', satir).strip()
                 satir_norm = normalize_text(temiz_satir)
-                if keyword_norm in satir_norm:
+                # Kelime satırın içinde geçiyorsa SATIRIN TAMAMINI ekle
+                if temiz_satir and keyword_norm in satir_norm:
                     satirlar.append(temiz_satir)
                     
     doc.close()
-    return satirlar, total_pages
+    return satirlar
 
 # --- Bot komutları ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -100,15 +115,16 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         progress_msg = await update.message.reply_text("Arama yapılıyor, lütfen bekleyin...")
 
-        # Hızlı arama fonksiyonunu arka plan thread'inde çalıştır
-        satirlar, total_pages = await asyncio.to_thread(search_in_pdf_fast, file_path, keyword_norm)
+        # Arama işlemini botu dondurmayacak şekilde arka planda çalıştırıyoruz
+        satirlar = await asyncio.to_thread(search_lines_in_pdf, file_path, keyword_norm)
 
         if not satirlar:
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
 
-        await progress_msg.edit_text(f"Toplam {len(satirlar)} sonuç bulundu. Sonuç PDF'i oluşturuluyor...")
+        await progress_msg.edit_text(f"Toplam {len(satirlar)} satır bulundu. Sonuç PDF'i oluşturuluyor...")
 
+        # Güvenli dosya adı oluşturma
         safe_keyword = re.sub(r'[^\w\-_]', '_', keyword)
         output_path = f"{user_id}_{safe_keyword}_sonuclar.pdf"
 
@@ -126,6 +142,7 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pdf_output.cell(0, 10, header_text, new_x="LMARGIN", new_y="NEXT", align="C")
         pdf_output.ln(5)
 
+        # Bulunan satırları numaralandırarak PDF'e ekleme
         for i, satir in enumerate(satirlar, 1):
             if not os.path.exists(font_path):
                 satir = satir.encode('latin-1', 'replace').decode('latin-1')
@@ -147,6 +164,7 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(err_msg)
 
     finally:
+        # Üretilen geçici sonuç PDF'ini sil (orijinal kullanıcı PDF'i durur, böylece tekrar arama yapabilir)
         if output_path and os.path.exists(output_path):
             os.remove(output_path)
         user_busy[user_id] = False

@@ -10,27 +10,26 @@ import re
 import unicodedata
 import urllib.request
 import asyncio
-import time
+import gc
 
-# Bot Tokeniniz
+# Bot Token
 TOKEN = "8834883881:AAEYOoaFEqWw3HtwCVl87R9UI2exXED18-s"
 
 user_files = {}   # {user_id: pdf_path}
 user_busy = {}    # {user_id: True/False}
 
-# --- Fontu Otomatik İndirme Fonksiyonu ---
 FONT_PATH = "DejaVuSans.ttf"
+
 def ensure_font_exists():
     if not os.path.exists(FONT_PATH):
-        print("DejaVuSans.ttf bulunamadı, indiriliyor...")
+        print("DejaVuSans.ttf indiriliyor...")
         url = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/ttf/DejaVuSans.ttf"
         try:
             urllib.request.urlretrieve(url, FONT_PATH)
-            print("Font başarıyla indirildi ✅")
+            print("Font indirildi ✅")
         except Exception as e:
-            print(f"Font indirilirken hata oluştu: {e}")
+            print(f"Font hatası: {e}")
 
-# --- Normalizasyon fonksiyonu ---
 def normalize_text(text: str) -> str:
     if not text:
         return ""
@@ -38,22 +37,6 @@ def normalize_text(text: str) -> str:
     text = text.replace("İ", "i").replace("I", "ı")
     return text.lower()
 
-# --- Senkron Arama Fonksiyonu (Arka planda çalışacak) ---
-def search_in_pdf_sync(file_path: str, keyword_norm: str):
-    satirlar = []
-    with pdfplumber.open(file_path) as pdf:
-        total_pages = len(pdf.pages)
-        for idx, sayfa in enumerate(pdf.pages, 1):
-            metin = sayfa.extract_text()
-            if metin:
-                for satir in metin.split("\n"):
-                    temiz_satir = re.sub(r'\s+', ' ', satir).strip()
-                    satir_norm = normalize_text(temiz_satir)
-                    if keyword_norm in satir_norm:
-                        satirlar.append(temiz_satir)
-            yield idx, total_pages, satirlar
-
-# --- Bot komutları ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Merhaba! PDF dosyanızı gönderin. PDF gönderildikten sonra /search kelime komutunu kullanabilirsiniz.\n"
@@ -109,37 +92,48 @@ async def search_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
         satirlar = []
 
         progress_msg = await update.message.reply_text("Arama başladı... %0")
-        last_update_time = time.time()
-        last_progress = 0
 
-        # PDF okumayı kilitlenmeye neden olmayacak şekilde döngüye alıyoruz
-        loop = asyncio.get_running_loop()
-        gen = search_in_pdf_sync(file_path, keyword_norm)
+        # PDF tarama işlemini asenkron döküm ile yapıyoruz
+        with pdfplumber.open(file_path) as pdf:
+            total_pages = len(pdf.pages)
+            last_reported_progress = 0
 
-        while True:
-            try:
-                # Ağır işlemi parçalar halinde çağırıyoruz
-                idx, total_pages, current_satirlar = await loop.run_in_executor(None, next, gen)
-                satirlar = current_satirlar
+            for idx, sayfa in enumerate(pdf.pages, 1):
+                # Sayfa metnini al
+                metin = sayfa.extract_text()
+                if metin:
+                    for satir in metin.split("\n"):
+                        temiz_satir = re.sub(r'\s+', ' ', satir).strip()
+                        satir_norm = normalize_text(temiz_satir)
+                        if keyword_norm in satir_norm:
+                            satirlar.append(temiz_satir)
+
+                # Bellek temizliği (RAM şişmesini engeller)
+                sayfa.flush_cache()
+
+                # Yüzde hesabı
                 progress = int((idx / total_pages) * 100)
 
-                # Telegram API limitine takılmamak için en az 2 saniyede bir mesajı güncelle
-                current_time = time.time()
-                if (current_time - last_update_time >= 2.0) and (progress != last_progress):
+                # Her %20 değişimde bir mesaj güncelle (Rate limit & donma önleyici)
+                if progress >= last_reported_progress + 20 or idx == total_pages:
+                    last_reported_progress = progress
                     try:
                         await progress_msg.edit_text(f"Arama devam ediyor... %{progress}")
-                        last_update_time = current_time
-                        last_progress = progress
                     except Exception:
                         pass
-            except StopIteration:
-                break
+                
+                # Her 10 sayfada bir event loop'a nefes aldır (Railway timeout düşmesini engeller)
+                if idx % 10 == 0:
+                    await asyncio.sleep(0.01)
+
+        # Çöp toplayıcıyı çalıştır
+        gc.collect()
 
         if not satirlar:
             await progress_msg.edit_text(f"'{keyword}' kelimesi PDF içinde bulunamadı.")
             return
 
-        # PDF sonuç oluştur
+        # Sonuç PDF oluşturma
         output_path = f"{user_id}_sonuc.pdf"
         pdf_output = FPDF()
         pdf_output.add_page()
